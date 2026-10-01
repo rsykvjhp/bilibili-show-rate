@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站显示点赞率、投币率、收藏率
 // @namespace    http://tampermonkey.net/
-// @version      1.1.5
+// @version      1.1.6
 // @description  显示b站 | bilibili | 哔哩哔哩 点赞率、投币率、收藏率
 // @license      MIT
 // @author       魂hp
@@ -26,204 +26,282 @@
 // ==/UserScript==
 
 (function () {
-    // representation字段表示比率的表示形式，该字段为 fractions 时表示为分数，该字段为 percentage 时表示为百分比
+    'use strict';
+
+    // ===================== 设置 =====================
+
+    // representation 表示比率的表示形式：fractions 为分数，percentage 为百分比
     let representation = GM_getValue('representation');
     if (representation == null) {
-        GM_setValue('representation', 'percentage');
         representation = 'percentage';
+        GM_setValue('representation', representation);
     }
     const isFractions = representation === 'fractions';
 
     // 注册脚本菜单以实现两种表示方式的相互转换
-    GM_registerMenuCommand(
-        '切换比率的表示方式（百分比和分数）',
-        function () {
-            representation = representation === 'fractions' ? 'percentage' : 'fractions';
-            GM_setValue('representation', representation);
-            location.reload();
-        }
-    );
-    // 判断当前页面
-    let currentPage = 'unknown';
-    if (location.pathname === '/') {
-        currentPage = 'mainPage';
-    } else if (location.pathname.match(/\/video\/.*\//)) {
-        currentPage = 'videoPage';
-    } else if (location.pathname.match(/list\/watchlater.*/)) {
-        currentPage = 'videoPageWatchList';
-    } else if (location.pathname === '/all') {
-        currentPage = 'searchPage';
-    } else if (location.pathname.startsWith('/c/')) {
-        currentPage = 'region';
+    GM_registerMenuCommand('切换比率的表示方式（百分比和分数）', function () {
+        GM_setValue('representation', isFractions ? 'percentage' : 'fractions');
+        location.reload();
+    });
+
+    // ===================== 工具函数 =====================
+
+    // 点赞图标（首页卡片和分区卡片样式略有不同，用参数区分）
+    const LIKE_ICON_PATH = 'M594.176 151.168a34.048 34.048 0 0 0-29.184 10.816c-11.264 13.184-15.872 24.064-21.504 40.064l-1.92 5.632c-5.632 16.128-12.8 36.864-27.648 63.232-25.408 44.928-50.304 74.432-86.208 97.024-23.04 14.528-43.648 26.368-65.024 32.576v419.648a4569.408 4569.408 0 0 0 339.072-4.672c38.72-2.048 72-21.12 88.96-52.032 21.504-39.36 47.168-95.744 63.552-163.008a782.72 782.72 0 0 0 22.528-163.008c0.448-16.832-13.44-32.256-35.328-32.256h-197.312a32 32 0 0 1-28.608-46.336l0.192-0.32 0.64-1.344 2.56-5.504c2.112-4.8 5.12-11.776 8.32-20.16 6.592-17.088 13.568-39.04 16.768-60.416 4.992-33.344 3.776-60.16-9.344-84.992-14.08-26.688-30.016-33.728-40.512-34.944zM691.84 341.12h149.568c52.736 0 100.864 40.192 99.328 98.048a845.888 845.888 0 0 1-24.32 176.384 742.336 742.336 0 0 1-69.632 178.56c-29.184 53.44-84.48 82.304-141.76 85.248-55.68 2.88-138.304 5.952-235.712 5.952-96 0-183.552-3.008-244.672-5.76-66.432-3.136-123.392-51.392-131.008-119.872a1380.672 1380.672 0 0 1-0.768-296.704c7.68-72.768 70.4-121.792 140.032-121.792h97.728c13.76 0 28.16-5.504 62.976-27.456 24.064-15.104 42.432-35.2 64.512-74.24 11.904-21.184 17.408-36.928 22.912-52.8l2.048-5.888c6.656-18.88 14.4-38.4 33.28-60.416a97.984 97.984 0 0 1 85.12-32.768c35.264 4.096 67.776 26.88 89.792 68.608 22.208 42.176 21.888 84.864 16 124.352a342.464 342.464 0 0 1-15.424 60.544z m-393.216 477.248V405.184H232.96c-40.448 0-72.448 27.712-76.352 64.512a1318.912 1318.912 0 0 0 0.64 282.88c3.904 34.752 32.96 61.248 70.4 62.976 20.8 0.96 44.8 1.92 71.04 2.816z';
+
+    function likeIcon(className) {
+        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="18" height="18" fill="#ffffff"
+                    ${className ? `class="${className}"` : ''} style="margin-right:2px;">
+                    <path d="${LIKE_ICON_PATH}" fill="currentColor"></path>
+                </svg>`;
     }
-    // 工具函数：根据播放量和对应的数据算出比率并获取对应的颜色
-    function getRateAndColor(view, oneOfVideoStat) {
-        let res = {
-            rate: 0,
-            color: 'inherit'
-        };
-        let num = view / oneOfVideoStat;
-        if (num === Infinity) {
+
+    // 卡片上比率的 class（原来用 id="data"，同一页会有多个重名 id，改用 class）
+    const RATE_ITEM_CLASS = 'bili-rate-item';
+    const RATE_VALUE_CLASS = 'bili-rate-value';
+
+    const BVID_RE = /BV[0-9A-Za-z]{10}/;
+
+    // 从任意字符串里取出 BV 号，作为视频的唯一标识
+    function getBvid(text) {
+        const match = BVID_RE.exec(text || '');
+        return match ? match[0] : null;
+    }
+
+    // 根据播放量和点赞数算出比率，并给出对应的颜色
+    function getRateAndColor(view, like) {
+        const res = { rate: 0, color: 'inherit' };
+        if (!view || !like) {
             return res;
         }
-        // 当比率大于十分之一设置为橘色，大于二十五分之一设置为紫色，其他则设置为黑色（如果需要添加其他的范围对应的颜色或修改颜色可以改这部分）
+        const num = view / like;
+        // 比率大于十分之一为橘色，大于二十五分之一为紫色，其他为黑色
+        // （如需调整颜色或区间，改这里即可）
         if (num <= 10) {
-            if (isFractions) {
-                res.rate = num.toFixed(2);
-            } else {
-                res.rate = (oneOfVideoStat * 100 / view).toFixed(2);
-            }
+            res.rate = isFractions ? num.toFixed(2) : (like * 100 / view).toFixed(2);
             res.color = 'DarkOrange';
         } else if (num <= 25) {
-            if (isFractions) {
-                res.rate = num.toFixed(1);
-            } else {
-                res.rate = (oneOfVideoStat * 100 / view).toFixed(2);
-            }
+            res.rate = isFractions ? num.toFixed(1) : (like * 100 / view).toFixed(2);
             res.color = 'violet';
         } else {
-            if (isFractions) {
-                res.rate = num.toFixed(0);
-            } else {
-                res.rate = (oneOfVideoStat * 100 / view).toFixed(2);
-            }
+            res.rate = isFractions ? num.toFixed(0) : (like * 100 / view).toFixed(2);
         }
         return res;
     }
-    // 工具函数，用于对uri和stat进行加工，并添加到 urlToDataMap 中
-    function processURIAndStat(uri, stat, urlToDataMap) {
-        if (uri != null && uri !== '' && stat != null) {
-            const rateAndColor = getRateAndColor(stat.view, stat.like);
-            stat.rate = rateAndColor.rate;
-            stat.color = rateAndColor.color;
-            urlToDataMap.set(uri, stat);
-        }
-    }
-    // 工具函数，用于将对应格式的点赞路添加到视频卡片上
-    function addLikeRateToCard(node, urlToDataMap, key) {
-        const stat = urlToDataMap.get(key);
-        // 下面的这一行代码会导致浏览器尺寸发生变化时部分视频卡片上的点赞率消失，如果你很介意这一点可以将下面这一行代码删掉或注释掉（就是代码前面加上//），但是注释掉或者删掉会导致脚本占用更多的空间（不会太多）
-        urlToDataMap.delete(key);
-        if (stat != null) {
-            const span = node.querySelector('div.bili-video-card__stats--left').firstElementChild.cloneNode(false);
-            if (isFractions) {
-                span.innerHTML = `
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="18"
-                                        height="18" fill="#ffffff" class="bili-video-card__stats--icon" style="margin-right:2px;">
-                                        <path
-                                            d="M594.176 151.168a34.048 34.048 0 0 0-29.184 10.816c-11.264 13.184-15.872 24.064-21.504 40.064l-1.92 5.632c-5.632 16.128-12.8 36.864-27.648 63.232-25.408 44.928-50.304 74.432-86.208 97.024-23.04 14.528-43.648 26.368-65.024 32.576v419.648a4569.408 4569.408 0 0 0 339.072-4.672c38.72-2.048 72-21.12 88.96-52.032 21.504-39.36 47.168-95.744 63.552-163.008a782.72 782.72 0 0 0 22.528-163.008c0.448-16.832-13.44-32.256-35.328-32.256h-197.312a32 32 0 0 1-28.608-46.336l0.192-0.32 0.64-1.344 2.56-5.504c2.112-4.8 5.12-11.776 8.32-20.16 6.592-17.088 13.568-39.04 16.768-60.416 4.992-33.344 3.776-60.16-9.344-84.992-14.08-26.688-30.016-33.728-40.512-34.944zM691.84 341.12h149.568c52.736 0 100.864 40.192 99.328 98.048a845.888 845.888 0 0 1-24.32 176.384 742.336 742.336 0 0 1-69.632 178.56c-29.184 53.44-84.48 82.304-141.76 85.248-55.68 2.88-138.304 5.952-235.712 5.952-96 0-183.552-3.008-244.672-5.76-66.432-3.136-123.392-51.392-131.008-119.872a1380.672 1380.672 0 0 1-0.768-296.704c7.68-72.768 70.4-121.792 140.032-121.792h97.728c13.76 0 28.16-5.504 62.976-27.456 24.064-15.104 42.432-35.2 64.512-74.24 11.904-21.184 17.408-36.928 22.912-52.8l2.048-5.888c6.656-18.88 14.4-38.4 33.28-60.416a97.984 97.984 0 0 1 85.12-32.768c35.264 4.096 67.776 26.88 89.792 68.608 22.208 42.176 21.888 84.864 16 124.352a342.464 342.464 0 0 1-15.424 60.544z m-393.216 477.248V405.184H232.96c-40.448 0-72.448 27.712-76.352 64.512a1318.912 1318.912 0 0 0 0.64 282.88c3.904 34.752 32.96 61.248 70.4 62.976 20.8 0.96 44.8 1.92 71.04 2.816z"
-                                            fill="currentColor"></path>
-                                    </svg><span class="bili-video-card__stats--text">1/<span class="bili-video-card__stats--text" id="data"></span></span>
-                                `;
 
-            } else {
-                span.innerHTML = `
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="18"
-                                        height="18" fill="#ffffff" class="bili-video-card__stats--icon" style="margin-right:2px;">
-                                        <path
-                                            d="M594.176 151.168a34.048 34.048 0 0 0-29.184 10.816c-11.264 13.184-15.872 24.064-21.504 40.064l-1.92 5.632c-5.632 16.128-12.8 36.864-27.648 63.232-25.408 44.928-50.304 74.432-86.208 97.024-23.04 14.528-43.648 26.368-65.024 32.576v419.648a4569.408 4569.408 0 0 0 339.072-4.672c38.72-2.048 72-21.12 88.96-52.032 21.504-39.36 47.168-95.744 63.552-163.008a782.72 782.72 0 0 0 22.528-163.008c0.448-16.832-13.44-32.256-35.328-32.256h-197.312a32 32 0 0 1-28.608-46.336l0.192-0.32 0.64-1.344 2.56-5.504c2.112-4.8 5.12-11.776 8.32-20.16 6.592-17.088 13.568-39.04 16.768-60.416 4.992-33.344 3.776-60.16-9.344-84.992-14.08-26.688-30.016-33.728-40.512-34.944zM691.84 341.12h149.568c52.736 0 100.864 40.192 99.328 98.048a845.888 845.888 0 0 1-24.32 176.384 742.336 742.336 0 0 1-69.632 178.56c-29.184 53.44-84.48 82.304-141.76 85.248-55.68 2.88-138.304 5.952-235.712 5.952-96 0-183.552-3.008-244.672-5.76-66.432-3.136-123.392-51.392-131.008-119.872a1380.672 1380.672 0 0 1-0.768-296.704c7.68-72.768 70.4-121.792 140.032-121.792h97.728c13.76 0 28.16-5.504 62.976-27.456 24.064-15.104 42.432-35.2 64.512-74.24 11.904-21.184 17.408-36.928 22.912-52.8l2.048-5.888c6.656-18.88 14.4-38.4 33.28-60.416a97.984 97.984 0 0 1 85.12-32.768c35.264 4.096 67.776 26.88 89.792 68.608 22.208 42.176 21.888 84.864 16 124.352a342.464 342.464 0 0 1-15.424 60.544z m-393.216 477.248V405.184H232.96c-40.448 0-72.448 27.712-76.352 64.512a1318.912 1318.912 0 0 0 0.64 282.88c3.904 34.752 32.96 61.248 70.4 62.976 20.8 0.96 44.8 1.92 71.04 2.816z"
-                                            fill="currentColor"></path>
-                                    </svg><span class="bili-video-card__stats--text"><span class="bili-video-card__stats--text" id="data"></span>%</span>
-                                `;
-            }
-            let data = span.querySelector('#data');
-            data.style.color = stat.color;
-            data.textContent = stat.rate;
-            node.querySelector('.bili-video-card__stats--left').appendChild(span);
-        }
+    // ===================== 卡片上的比率 =====================
+
+    // bvid -> { view, like }
+    // 页面上的接口数据都先收集到这里，再统一渲染到卡片上。
+    // 这样即使卡片比数据先出现（服务端渲染的页面就是这样），数据到达后也能补上。
+    const statMap = new Map();
+
+    // 从卡片里找出对应的 BV 号
+    function bvidOfCard(statsEl) {
+        const card = statsEl.closest('.feed-card, .bili-video-card');
+        const link = card && card.querySelector('a[href*="/video/"]');
+        return link ? getBvid(link.href) : null;
     }
 
-    // 工具函数，用于将对应格式的点赞路添加到视频卡片上(针对分区)
-    function addLikeRateToCardForRegion(node, urlToDataMap, key) {
-        const stat = urlToDataMap.get(key);
-        urlToDataMap.delete(key);
-        if (stat != null) {
-            const span = node.querySelector('div.bili-cover-card__stats').firstElementChild.cloneNode(false);
-            if (isFractions) {
-                span.innerHTML = `
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="18"
-                                        height="18" fill="#ffffff" style="margin-right:2px;">
-                                        <path
-                                            d="M594.176 151.168a34.048 34.048 0 0 0-29.184 10.816c-11.264 13.184-15.872 24.064-21.504 40.064l-1.92 5.632c-5.632 16.128-12.8 36.864-27.648 63.232-25.408 44.928-50.304 74.432-86.208 97.024-23.04 14.528-43.648 26.368-65.024 32.576v419.648a4569.408 4569.408 0 0 0 339.072-4.672c38.72-2.048 72-21.12 88.96-52.032 21.504-39.36 47.168-95.744 63.552-163.008a782.72 782.72 0 0 0 22.528-163.008c0.448-16.832-13.44-32.256-35.328-32.256h-197.312a32 32 0 0 1-28.608-46.336l0.192-0.32 0.64-1.344 2.56-5.504c2.112-4.8 5.12-11.776 8.32-20.16 6.592-17.088 13.568-39.04 16.768-60.416 4.992-33.344 3.776-60.16-9.344-84.992-14.08-26.688-30.016-33.728-40.512-34.944zM691.84 341.12h149.568c52.736 0 100.864 40.192 99.328 98.048a845.888 845.888 0 0 1-24.32 176.384 742.336 742.336 0 0 1-69.632 178.56c-29.184 53.44-84.48 82.304-141.76 85.248-55.68 2.88-138.304 5.952-235.712 5.952-96 0-183.552-3.008-244.672-5.76-66.432-3.136-123.392-51.392-131.008-119.872a1380.672 1380.672 0 0 1-0.768-296.704c7.68-72.768 70.4-121.792 140.032-121.792h97.728c13.76 0 28.16-5.504 62.976-27.456 24.064-15.104 42.432-35.2 64.512-74.24 11.904-21.184 17.408-36.928 22.912-52.8l2.048-5.888c6.656-18.88 14.4-38.4 33.28-60.416a97.984 97.984 0 0 1 85.12-32.768c35.264 4.096 67.776 26.88 89.792 68.608 22.208 42.176 21.888 84.864 16 124.352a342.464 342.464 0 0 1-15.424 60.544z m-393.216 477.248V405.184H232.96c-40.448 0-72.448 27.712-76.352 64.512a1318.912 1318.912 0 0 0 0.64 282.88c3.904 34.752 32.96 61.248 70.4 62.976 20.8 0.96 44.8 1.92 71.04 2.816z"
-                                            fill="currentColor">
-                                        </path>
-                                    </svg>
-                                    <span>1/<span id="data"></span></span>
-                                `;
+    // 分区页（/c/xxx）的首屏卡片是服务端渲染的，页面接口里只有播放量、没有点赞数，
+    // 所以对这些拿不到数据的卡片单独查一次视频详情。其它页面接口数据是全的，不需要。
+    const needStatFallback = location.pathname.startsWith('/c/');
+    const statRequested = new Set();
 
-            } else {
-                span.innerHTML = `
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="18"
-                                        height="18" fill="#ffffff" style="margin-right:2px;">
-                                        <path
-                                            d="M594.176 151.168a34.048 34.048 0 0 0-29.184 10.816c-11.264 13.184-15.872 24.064-21.504 40.064l-1.92 5.632c-5.632 16.128-12.8 36.864-27.648 63.232-25.408 44.928-50.304 74.432-86.208 97.024-23.04 14.528-43.648 26.368-65.024 32.576v419.648a4569.408 4569.408 0 0 0 339.072-4.672c38.72-2.048 72-21.12 88.96-52.032 21.504-39.36 47.168-95.744 63.552-163.008a782.72 782.72 0 0 0 22.528-163.008c0.448-16.832-13.44-32.256-35.328-32.256h-197.312a32 32 0 0 1-28.608-46.336l0.192-0.32 0.64-1.344 2.56-5.504c2.112-4.8 5.12-11.776 8.32-20.16 6.592-17.088 13.568-39.04 16.768-60.416 4.992-33.344 3.776-60.16-9.344-84.992-14.08-26.688-30.016-33.728-40.512-34.944zM691.84 341.12h149.568c52.736 0 100.864 40.192 99.328 98.048a845.888 845.888 0 0 1-24.32 176.384 742.336 742.336 0 0 1-69.632 178.56c-29.184 53.44-84.48 82.304-141.76 85.248-55.68 2.88-138.304 5.952-235.712 5.952-96 0-183.552-3.008-244.672-5.76-66.432-3.136-123.392-51.392-131.008-119.872a1380.672 1380.672 0 0 1-0.768-296.704c7.68-72.768 70.4-121.792 140.032-121.792h97.728c13.76 0 28.16-5.504 62.976-27.456 24.064-15.104 42.432-35.2 64.512-74.24 11.904-21.184 17.408-36.928 22.912-52.8l2.048-5.888c6.656-18.88 14.4-38.4 33.28-60.416a97.984 97.984 0 0 1 85.12-32.768c35.264 4.096 67.776 26.88 89.792 68.608 22.208 42.176 21.888 84.864 16 124.352a342.464 342.464 0 0 1-15.424 60.544z m-393.216 477.248V405.184H232.96c-40.448 0-72.448 27.712-76.352 64.512a1318.912 1318.912 0 0 0 0.64 282.88c3.904 34.752 32.96 61.248 70.4 62.976 20.8 0.96 44.8 1.92 71.04 2.816z"
-                                            fill="currentColor">
-                                        </path>
-                                    </svg>
-                                    <span><span id="data"></span>%</span>
-                                `;
-            }
-            let data = span.querySelector('#data');
-            data.style.color = stat.color;
-            data.textContent = stat.rate;
-            const statNode = node.querySelector('.bili-cover-card__stats');
-            const lastChild = statNode.lastChild;
-            if (lastChild) {
-                statNode.insertBefore(span, lastChild);
-            } else {
-                statNode.appendChild(span);
-            }
+    function fetchStatByBvid(bvid) {
+        if (statRequested.has(bvid)) {
+            return;
         }
-    }
-
-    // 根据 currentPage 执行不同的逻辑
-    if (currentPage === 'mainPage') {
-        const originFetch = unsafeWindow.fetch;
-        const recommendUrlRegex = /^(?:http:|https:)?\/\/api.bilibili.com\/.*?\/rcmd\?.*$/;
-        const urlToDataMap = new Map(); // 一个map，键是视频uri，值为该视频的各项数据（播放、点赞、弹幕）
-        // 劫持b站的 fetch 请求，判断该 fetch 请求是不是包含视频数据，如果包含则将视频数据加入 map
-        // 参考自 https://juejin.cn/post/7135590843544502308
-        window.unsafeWindow.fetch = (url, options) => {
-            return originFetch(url, options).then(async (response) => {
-                if (recommendUrlRegex.test(url)) {
-                    const responseClone = response.clone();
-                    let res = await responseClone.json();
-                    for (let tmp of res.data.item) {
-                        processURIAndStat(tmp.uri, tmp.stat, urlToDataMap);
-                    }
+        statRequested.add(bvid);
+        fetch('https://api.bilibili.com/x/web-interface/view?bvid=' + bvid)
+            .then(function (res) { return res.json(); })
+            .then(function (json) {
+                const stat = json && json.data && json.data.stat;
+                if (stat) {
+                    statMap.set(bvid, { view: stat.view, like: stat.like });
+                    render();
                 }
-                return response;
-            });
-        };
-        // 当资源加载完成后，将不是动态加载的那些视频的数据加入到 map 中
-        window.addEventListener('load', function () {
-            for (let tmp of unsafeWindow.__pinia.feed.data.recommend.item) {
-                processURIAndStat(tmp.uri, tmp.stat, urlToDataMap);
+            })
+            .catch(function () {});
+    }
+
+    // 给一个卡片的统计区域挂上比率，style 为 'inline'（首页/搜索页）或 'cover'（分区页）
+    function applyRate(statsEl, style) {
+        const bvid = bvidOfCard(statsEl);
+        const stat = bvid ? statMap.get(bvid) : null;
+        if (!stat) {
+            if (needStatFallback && bvid) {
+                fetchStatByBvid(bvid);
             }
-            const cards = document.querySelectorAll('div.feed-card');
-            for (let card of cards) {
-                addLikeRateToCard(card, urlToDataMap, card.querySelector('.bili-video-card__image--link')?.href);
-            }
-            // 创建MutationObserver，监控新插入的视频卡片
-            new MutationObserver((mutationsList) => {
-                // 遍历每一个发生变化的mutation
-                for (let mutation of mutationsList) {
-                    // 检查每个添加的子节点
-                    if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                        // 遍历每个添加的子节点
-                        mutation.addedNodes.forEach(node => {
-                            if (node.nodeName === 'DIV' && (node.classList.contains('bili-feed-card') || node.classList.contains('feed-card')) ) {
-                                addLikeRateToCard(node, urlToDataMap, node.querySelector('.bili-video-card__image--link')?.href);
-                            }
-                        });
-                    }
-                }
-            }).observe(document, {
-                childList: true,
-                subtree: true
-            });
+            return;
+        }
+        // 已经挂过同一个视频的比率了。
+        // 注意不能只看 dataset：服务端渲染的卡片在水合时会被 Vue 重渲染，
+        // 我们插进去的节点会被冲掉，但 dataset 还留着，只看 dataset 就再也补不上了。
+        const old = statsEl.querySelector('.' + RATE_ITEM_CLASS);
+        if (old && statsEl.dataset.rateBvid === bvid) {
+            return;
+        }
+        // 卡片可能被复用成了另一个视频，或者插的节点被页面重渲染冲掉了，先清掉上一次挂的
+        if (old) {
+            old.remove();
+        }
+
+        const template = statsEl.firstElementChild;
+        if (!template) {
+            return;
+        }
+
+        const rateAndColor = getRateAndColor(stat.view, stat.like);
+        const value = `<span class="${RATE_VALUE_CLASS}"></span>`;
+        const item = template.cloneNode(false);
+        item.classList.add(RATE_ITEM_CLASS);
+        if (style === 'inline') {
+            item.innerHTML = likeIcon('bili-video-card__stats--icon')
+                + `<span class="bili-video-card__stats--text">${isFractions ? '1/' + value : value + '%'}</span>`;
+            statsEl.appendChild(item);
+        } else {
+            item.innerHTML = likeIcon('')
+                + `<span>${isFractions ? '1/' + value : value + '%'}</span>`;
+            statsEl.insertBefore(item, statsEl.lastElementChild);
+        }
+        const valueEl = item.querySelector('.' + RATE_VALUE_CLASS);
+        valueEl.style.color = rateAndColor.color;
+        valueEl.textContent = rateAndColor.rate;
+        statsEl.dataset.rateBvid = bvid;
+    }
+
+    // 把已有的数据渲染到页面上所有还没挂比率的卡片上
+    function render() {
+        // 没有数据时什么都不用做；分区页除外，它要靠 applyRate 触发补数据
+        if (statMap.size === 0 && !needStatFallback) {
+            return;
+        }
+        document.querySelectorAll('.bili-video-card__stats--left').forEach(function (el) {
+            applyRate(el, 'inline');
         });
-    } else if (currentPage === 'videoPage' || currentPage === 'videoPageWatchList') {
+        document.querySelectorAll('.bili-cover-card__stats').forEach(function (el) {
+            applyRate(el, 'cover');
+        });
+    }
+
+    // 页面结构变化很频繁，合并成一次渲染
+    let renderScheduled = false;
+    function scheduleRender() {
+        if (renderScheduled) {
+            return;
+        }
+        renderScheduled = true;
+        setTimeout(function () {
+            renderScheduled = false;
+            render();
+        }, 200);
+    }
+
+    // Vue 的 ref 取值要加 ._value，从 store 里读数据时用得上
+    function unwrap(value) {
+        return value && value.__v_isRef ? value._value : value;
+    }
+
+    // 收一条数据进 statMap。各接口的字段名不一样，这里统一识别：
+    //   bvid / uri        视频标识
+    //   stat.view / play  播放量
+    //   stat.like / like  点赞数
+    function collectEntry(entry) {
+        if (!entry) {
+            return;
+        }
+        // 搜索页的 result[] 是按类型分组的，真正的视频列表在 entry.data[] 里
+        const list = unwrap(entry.data);
+        if (Array.isArray(list)) {
+            list.forEach(collectEntry);
+            return;
+        }
+        const bvid = entry.bvid || getBvid(entry.uri);
+        const view = entry.stat ? entry.stat.view : entry.play;
+        const like = entry.stat ? entry.stat.like : entry.like;
+        if (bvid && view != null && like != null) {
+            statMap.set(bvid, { view: view, like: like });
+        }
+    }
+
+    // 从接口返回的数据里收集视频的播放量和点赞数。
+    // 首页、搜索页、分区页的返回结构不一样，这里统一处理：
+    //   - data.item[]     首页推荐（uri + stat）
+    //   - data.archives[] 分区推荐（bvid + stat）
+    //   - data.result[]   搜索页（bvid + play + like）
+    function collect(data) {
+        if (!data || typeof data !== 'object') {
+            return;
+        }
+        ['item', 'archives', 'result'].forEach(function (field) {
+            const list = unwrap(data[field]);
+            if (Array.isArray(list)) {
+                list.forEach(collectEntry);
+            }
+        });
+        render();
+    }
+
+    // 劫持 fetch，把返回视频列表的接口数据交给 collect
+    const VIDEO_LIST_URL_RE = /rcmd|search\/(type|all)/;
+    const originFetch = unsafeWindow.fetch;
+    unsafeWindow.fetch = function (input, init) {
+        const promise = originFetch.apply(this, arguments);
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (VIDEO_LIST_URL_RE.test(url)) {
+            promise.then(function (response) {
+                response.clone().json().then(function (json) {
+                    collect(json && json.data);
+                }).catch(function () {});
+            }).catch(function () {});
+        }
+        return promise;
+    };
+
+    // 首屏的卡片是服务端渲染的，这批数据不会走接口，只存在于 Vue 的 store 里，
+    // 所以要单独从 store 里补一次。首页和搜索页的 store 结构不同，分别取：
+    //   首页   __pinia.feed.data.recommend.item[]            （uri + stat）
+    //   搜索页 __pinia.searchResponse.searchAllResponse.result[]（bvid + play + like）
+    // store 里的值外面可能包了一层 Vue 的 ref，统一用 unwrap 取值。
+    function collectFromStore() {
+        const pinia = unsafeWindow.__pinia;
+        if (!pinia) {
+            return false;
+        }
+        let collected = false;
+
+        const feed = unwrap(pinia.feed);
+        const feedData = feed ? unwrap(feed.data) : null;
+        const feedItems = feedData && feedData.recommend ? feedData.recommend.item : null;
+        if (Array.isArray(feedItems) && feedItems.length) {
+            collect({ item: feedItems });
+            collected = true;
+        }
+
+        const searchResponse = unwrap(pinia.searchResponse);
+        const searchAll = searchResponse ? unwrap(searchResponse.searchAllResponse) : null;
+        const searchResult = searchAll ? unwrap(searchAll.result) : null;
+        if (Array.isArray(searchResult) && searchResult.length) {
+            collect({ result: searchResult });
+            collected = true;
+        }
+
+        return collected;
+    }
+
+    // 新卡片插入（翻页、无限滚动、站内跳转）时补渲染
+    new MutationObserver(scheduleRender).observe(document, {
+        childList: true,
+        subtree: true
+    });
+
+    // ===================== 视频详情页 =====================
+
+    const isVideoPage = /^\/video\//.test(location.pathname)
+        || /^\/list\/watchlater/.test(location.pathname);
+
+    if (isVideoPage) {
         document.addEventListener('DOMContentLoaded', function () {
             if (!(unsafeWindow?.__INITIAL_STATE__?.videoData?.stat?.view)) {
                 return;
@@ -366,133 +444,29 @@
                 subtree: true
             });
         });
-    } else if (currentPage === 'searchPage') {
-        // 修改样式
-        GM.addStyle(`
-            .bili-video-card__stats--left{
-                flex-wrap: wrap;
-                align-self: flex-end;
-            }
-        `);
-        const bvToDataMap = new Map(); // 一个map，键是视频bv号，值为该视频的各项数据（播放、点赞）
-
-        // 劫持 fetch 请求
-        const originFetch = unsafeWindow.fetch;
-        window.unsafeWindow.fetch = (url, options) => {
-            return originFetch(url, options).then(async (response) => {
-                if (/^(?:http:|https:)?\/\/api\.bilibili\.com\/x\/web-interface\/wbi\/search\/type/.test(url)) {
-                    const responseClone = response.clone();
-                    let res = await responseClone.json();
-                    res['data']['result']
-                        .filter(data => data.type === 'video')
-                        .forEach(data => processURIAndStat(data.bvid, { view: data.play, like: data.like }, bvToDataMap));
-                    // console.log(bvToDataMap);
-                } else if (/^(?:http:|https:)?\/\/api\.bilibili\.com\/x\/web-interface\/wbi\/search\/all\/v2/.test(url)) {
-                    const responseClone = response.clone();
-                    let res = await responseClone.json();
-                    res['data']['result'][11]['data']
-                        .filter(data => data.type === 'video')
-                        .forEach(data => processURIAndStat(data.bvid, { view: data.play, like: data.like }, bvToDataMap));
-                    // console.log(bvToDataMap);
+    } else {
+        if (location.hostname === 'search.bilibili.com') {
+            // 搜索页卡片底部空间比较小，需要换行
+            GM.addStyle(`
+                .bili-video-card__stats--left{
+                    flex-wrap: wrap;
+                    align-self: flex-end;
                 }
-                return response;
-            });
-        };
+            `);
+        }
 
-        // 调试代码，暂时留着
-        // window.addEventListener('load', function () {
-        //     new MutationObserver((mutationsList) => {
-        //         // 遍历每一个发生变化的mutation
-        //         for (let mutation of mutationsList) {
-        //             if (mutation.target.nodeName !== 'svg' && !['feed-card-body', 'bili-video-card__image--wrap'].some(str => mutation.target.classList.contains(str))) {
-        //                 console.log(mutation)
-        //             }
-        //         }
-        //     }).observe(document.querySelector('div.search-content'), {
-        //         childList: true,
-        //         subtree: true
-        //     });
-        // });
-
-
-        // 当资源加载完成后，将不是动态加载的那些视频的数据加入到 map 中
-        window.addEventListener('load', function () {
-            // debugger;
-            let data = unsafeWindow.__pinia.searchTypeResponse?.searchTypeResponse?.result;
-            if (data === undefined) {
-                data = unsafeWindow.__pinia.searchResponse.searchAllResponse.result[11].data;
+        // store 要等 Vue 挂载完才出现，所以轮询等它，拿到数据就停（最多约 10 秒）
+        let storeTries = 0;
+        const storeTimer = setInterval(function () {
+            let collected = false;
+            try {
+                collected = collectFromStore();
+            } catch (e) {
+                // 页面结构万一变了，也不能影响脚本其它部分
             }
-            data.filter(data => data.type === 'video')
-                .forEach(data => processURIAndStat(data.bvid, { view: data.play, like: data.like }, bvToDataMap));
-            document.querySelectorAll('div.video.search-all-list div.bili-video-card').values()
-                .filter(card => card.querySelector('a') != null && /bv\w{10}/i.exec(card.querySelector('a').href) != null)
-                .forEach(card => addLikeRateToCard(card, bvToDataMap, /bv\w{10}/i.exec(card.querySelector('a').href)[0]));
-
-            // 创建MutationObserver，监控新插入的视频卡片
-            new MutationObserver((mutationsList) => {
-                mutationsList
-                    .filter(mutation => mutation.type === 'childList' && mutation.addedNodes.length > 0)
-                    .forEach(
-                        mutation => mutation.addedNodes
-                            .forEach(node => {
-                                if (node.nodeName === 'DIV' && node.classList.contains('search-page') && mutation.target.classList.contains('search-page-wrapper')) {
-                                    node.querySelectorAll('div.bili-video-card').values()
-                                        .filter(card => card.querySelector('a') != null && /bv\w{10}/i.exec(card.querySelector('a').href) != null)
-                                        .forEach(card => addLikeRateToCard(card, bvToDataMap, /bv\w{10}/i.exec(card.querySelector('a').href)[0]));
-                                } else if (node.nodeName === 'DIV' && ['video', 'search-all-list'].every(str => node.classList.contains(str))) {
-                                    // 从其他页返回第一页时
-                                    node.querySelectorAll('div.video.search-all-list div.bili-video-card').values()
-                                        .filter(card => card.querySelector('a') != null && /bv\w{10}/i.exec(card.querySelector('a').href) != null)
-                                        .forEach(card => addLikeRateToCard(card, bvToDataMap, /bv\w{10}/i.exec(card.querySelector('a').href)[0]));
-                                }
-                            })
-                    );
-            }).observe(document, {
-                childList: true,
-                subtree: true
-            });
-        });
-    } else if (currentPage === 'region') {
-        const originFetch = unsafeWindow.fetch;
-        const bvidToDataMap = new Map(); // 一个map，键是视频bv号，值为该视频的各项数据（播放、点赞、弹幕）
-        // 劫持b站的 fetch 请求，判断该 fetch 请求是不是包含视频数据，如果包含则将视频数据加入 map
-        window.unsafeWindow.fetch = (url, options) => {
-            return originFetch(url, options).then(async (response) => {
-                if (/^(?:http:|https:)?\/\/api.bilibili.com\/.*?\/rcmd\?.*$/.test(url)) {
-                    const responseClone = response.clone();
-                    let res = await responseClone.json();
-                    for (let tmp of res.data.archives) {
-                        processURIAndStat(tmp.bvid, tmp.stat, bvidToDataMap);
-                    }
-                }
-                return response;
-            });
-        };
-
-        // 创建 MutationObserver，监控新加入的 videoCard 并对其进行处理
-        new MutationObserver((mutationsList) => {
-            for (let mutation of mutationsList) {
-                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                    mutation.addedNodes.values()
-                        .filter(node => node.nodeName === 'DIV')
-                        .forEach(node => {
-                            if (node.classList.contains('channel-page__body')) {
-                                node.querySelectorAll('div.feed-card.head-card').values().forEach(
-                                    card => addLikeRateToCardForRegion(card, bvidToDataMap, /bv\w{10}/i.exec(card.querySelector('a').href)[0])
-                                                                    );
-                            } else if (node.classList.contains('feed-cards')) {
-                                for (const card of node.children) {
-                                    addLikeRateToCardForRegion(card, bvidToDataMap, /bv\w{10}/i.exec(card.querySelector('a').href)[0]);
-                                }
-                            } else if (node.classList.contains('feed-card')) {
-                                addLikeRateToCardForRegion(node, bvidToDataMap, /bv\w{10}/i.exec(node.querySelector('a').href)[0]);
-                            }
-                        });
-                }
+            if (collected || ++storeTries > 50) {
+                clearInterval(storeTimer);
             }
-        }).observe(document, {
-            childList: true,
-            subtree: true
-        });
+        }, 200);
     }
 })();
