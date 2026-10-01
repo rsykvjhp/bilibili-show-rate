@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站显示点赞率、投币率、收藏率
 // @namespace    http://tampermonkey.net/
-// @version      1.1.6
+// @version      1.2.0
 // @description  显示b站 | bilibili | 哔哩哔哩 点赞率、投币率、收藏率
 // @license      MIT
 // @author       魂hp
@@ -12,6 +12,7 @@
 // @match        http*://www.bilibili.com/list/watchlater*
 // @match        http*://www.bilibili.com/c/*
 // @match        http*://search.bilibili.com/all?*
+// @match        http*://space.bilibili.com/*
 // @icon         data:image/jpeg;base64,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
 // @grant        GM.addStyle
 // @grant        unsafeWindow
@@ -103,29 +104,52 @@
         return link ? getBvid(link.href) : null;
     }
 
-    // 分区页（/c/xxx）的首屏卡片是服务端渲染的，页面接口里只有播放量、没有点赞数，
-    // 所以对这些拿不到数据的卡片单独查一次视频详情。其它页面接口数据是全的，不需要。
-    const needStatFallback = location.pathname.startsWith('/c/');
+    // 有些页面的卡片从接口里拿不到点赞数，只能按 bvid 单独查一次视频详情：
+    //   - 分区页（/c/xxx）：首屏卡片是服务端渲染的，接口数据里只有播放量
+    //   - UP 主页：投稿、合集和系列、主页三栏的接口（arc/search、seasons_series）
+    //     都只返回播放量，没有点赞数
+    // 其它页面的接口数据是全的，不需要这一步。
+    const needStatFallback = location.pathname.startsWith('/c/')
+        || location.hostname === 'space.bilibili.com';
     const statRequested = new Set();
+
+    // UP 主页一屏可能有上百张卡片，一次全甩出去太猛，排个队慢慢查
+    const MAX_STAT_REQUESTS = 6;
+    const statQueue = [];
+    let statRunning = 0;
 
     function fetchStatByBvid(bvid) {
         if (statRequested.has(bvid)) {
             return;
         }
         statRequested.add(bvid);
-        fetch('https://api.bilibili.com/x/web-interface/view?bvid=' + bvid)
-            .then(function (res) { return res.json(); })
-            .then(function (json) {
-                const stat = json && json.data && json.data.stat;
-                if (stat) {
-                    statMap.set(bvid, { view: stat.view, like: stat.like });
-                    render();
-                }
-            })
-            .catch(function () {});
+        statQueue.push(bvid);
+        runStatQueue();
     }
 
-    // 给一个卡片的统计区域挂上比率，style 为 'inline'（首页/搜索页）或 'cover'（分区页）
+    function runStatQueue() {
+        while (statRunning < MAX_STAT_REQUESTS && statQueue.length) {
+            statRunning++;
+            const bvid = statQueue.shift();
+            fetch('https://api.bilibili.com/x/web-interface/view?bvid=' + bvid)
+                .then(function (res) { return res.json(); })
+                .then(function (json) {
+                    const stat = json && json.data && json.data.stat;
+                    if (stat) {
+                        statMap.set(bvid, { view: stat.view, like: stat.like });
+                    }
+                })
+                .catch(function () {})
+                .then(function () {
+                    statRunning--;
+                    scheduleRender();
+                    runStatQueue();
+                });
+        }
+    }
+
+    // 给一个卡片的统计区域挂上比率。
+    // style 为 'inline'（首页/搜索页，横向排列）或 'cover'（分区页/UP 主页，压在封面底部）
     function applyRate(statsEl, style) {
         const bvid = bvidOfCard(statsEl);
         const stat = bvid ? statMap.get(bvid) : null;
