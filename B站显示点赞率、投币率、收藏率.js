@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站显示点赞率、投币率、收藏率
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      1.2.1
 // @description  显示b站 | bilibili | 哔哩哔哩 点赞率、投币率、收藏率
 // @license      MIT
 // @author       魂hp
@@ -50,8 +50,8 @@
     // 点赞图标（首页卡片和分区卡片样式略有不同，用参数区分）
     const LIKE_ICON_PATH = 'M594.176 151.168a34.048 34.048 0 0 0-29.184 10.816c-11.264 13.184-15.872 24.064-21.504 40.064l-1.92 5.632c-5.632 16.128-12.8 36.864-27.648 63.232-25.408 44.928-50.304 74.432-86.208 97.024-23.04 14.528-43.648 26.368-65.024 32.576v419.648a4569.408 4569.408 0 0 0 339.072-4.672c38.72-2.048 72-21.12 88.96-52.032 21.504-39.36 47.168-95.744 63.552-163.008a782.72 782.72 0 0 0 22.528-163.008c0.448-16.832-13.44-32.256-35.328-32.256h-197.312a32 32 0 0 1-28.608-46.336l0.192-0.32 0.64-1.344 2.56-5.504c2.112-4.8 5.12-11.776 8.32-20.16 6.592-17.088 13.568-39.04 16.768-60.416 4.992-33.344 3.776-60.16-9.344-84.992-14.08-26.688-30.016-33.728-40.512-34.944zM691.84 341.12h149.568c52.736 0 100.864 40.192 99.328 98.048a845.888 845.888 0 0 1-24.32 176.384 742.336 742.336 0 0 1-69.632 178.56c-29.184 53.44-84.48 82.304-141.76 85.248-55.68 2.88-138.304 5.952-235.712 5.952-96 0-183.552-3.008-244.672-5.76-66.432-3.136-123.392-51.392-131.008-119.872a1380.672 1380.672 0 0 1-0.768-296.704c7.68-72.768 70.4-121.792 140.032-121.792h97.728c13.76 0 28.16-5.504 62.976-27.456 24.064-15.104 42.432-35.2 64.512-74.24 11.904-21.184 17.408-36.928 22.912-52.8l2.048-5.888c6.656-18.88 14.4-38.4 33.28-60.416a97.984 97.984 0 0 1 85.12-32.768c35.264 4.096 67.776 26.88 89.792 68.608 22.208 42.176 21.888 84.864 16 124.352a342.464 342.464 0 0 1-15.424 60.544z m-393.216 477.248V405.184H232.96c-40.448 0-72.448 27.712-76.352 64.512a1318.912 1318.912 0 0 0 0.64 282.88c3.904 34.752 32.96 61.248 70.4 62.976 20.8 0.96 44.8 1.92 71.04 2.816z';
 
-    function likeIcon(className) {
-        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="18" height="18" fill="#ffffff"
+    function likeIcon(className, size) {
+        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="${size}" height="${size}" fill="#ffffff"
                     ${className ? `class="${className}"` : ''} style="margin-right:2px;">
                     <path d="${LIKE_ICON_PATH}" fill="currentColor"></path>
                 </svg>`;
@@ -60,6 +60,8 @@
     // 卡片上比率的 class（原来用 id="data"，同一页会有多个重名 id，改用 class）
     const RATE_ITEM_CLASS = 'bili-rate-item';
     const RATE_VALUE_CLASS = 'bili-rate-value';
+    // UP 主页卡片上我们自己加的分组容器，见 groupStats()
+    const STATS_GROUP_CLASS = 'bili-stats-group';
 
     const BVID_RE = /BV[0-9A-Za-z]{10}/;
 
@@ -104,13 +106,23 @@
         return link ? getBvid(link.href) : null;
     }
 
+    // 卡片自带图标的尺寸：首页、分区页是 18px，UP 主页的卡片小一号，是 16px。
+    // 我们的图标跟着它走，免得同一行里大小不一。
+    function siblingIconSize(statsEl) {
+        const icon = statsEl.querySelector('i, svg');
+        const size = icon && Math.round(icon.getBoundingClientRect().width);
+        return size >= 12 && size <= 24 ? size : 18;
+    }
+
+    // UP 主页（space.bilibili.com）的卡片比首页窄，加上比率后一行放不下，需要单独处理
+    const isSpacePage = location.hostname === 'space.bilibili.com';
+
     // 有些页面的卡片从接口里拿不到点赞数，只能按 bvid 单独查一次视频详情：
     //   - 分区页（/c/xxx）：首屏卡片是服务端渲染的，接口数据里只有播放量
     //   - UP 主页：投稿、合集和系列、主页三栏的接口（arc/search、seasons_series）
     //     都只返回播放量，没有点赞数
     // 其它页面的接口数据是全的，不需要这一步。
-    const needStatFallback = location.pathname.startsWith('/c/')
-        || location.hostname === 'space.bilibili.com';
+    const needStatFallback = location.pathname.startsWith('/c/') || isSpacePage;
     const statRequested = new Set();
 
     // UP 主页一屏可能有上百张卡片，一次全甩出去太猛，排个队慢慢查
@@ -148,6 +160,32 @@
         }
     }
 
+    // UP 主页的卡片结构和首页/搜索页不一样，所以这里要自己造一个分组：
+    //   首页/搜索页：统计行里是「左侧一组（播放/弹幕/比率）」+「时长」两个兄弟节点，
+    //               换行只发生在左侧那一组内部，时长始终待在右边
+    //   UP 主页    ：统计行里是 4 个并列的 div，时长也在里面，会跟着一起换行
+    // 于是把时长以外的项收进一个容器（时长留在外面），就能得到和首页/搜索页一样的效果。
+    function groupStats(statsEl) {
+        const duration = statsEl.lastElementChild;
+        if (!duration) {
+            return null;
+        }
+        let group = statsEl.firstElementChild;
+        if (!group.classList.contains(STATS_GROUP_CLASS)) {
+            if (statsEl.children.length < 2) {
+                return null;
+            }
+            group = document.createElement('div');
+            group.className = STATS_GROUP_CLASS;
+            statsEl.insertBefore(group, statsEl.firstElementChild);
+        }
+        // 除最后一项（时长）外都收进容器；页面重渲染后可能有几项又跑到外面来了
+        while (statsEl.children.length > 2) {
+            group.appendChild(statsEl.children[1]);
+        }
+        return group;
+    }
+
     // 给一个卡片的统计区域挂上比率。
     // style 为 'inline'（首页/搜索页，横向排列）或 'cover'（分区页/UP 主页，压在封面底部）
     function applyRate(statsEl, style) {
@@ -171,22 +209,31 @@
             old.remove();
         }
 
-        const template = statsEl.firstElementChild;
+        // UP 主页先把前三项收进一个容器，时长留在外面（这样换行只会挤到左边这一组）
+        const group = (style === 'cover' && isSpacePage) ? groupStats(statsEl) : null;
+        const parent = group || statsEl;
+        const template = parent.firstElementChild;
         if (!template) {
             return;
         }
 
         const rateAndColor = getRateAndColor(stat.view, stat.like);
+        const size = siblingIconSize(statsEl);
         const value = `<span class="${RATE_VALUE_CLASS}"></span>`;
         const item = template.cloneNode(false);
         item.classList.add(RATE_ITEM_CLASS);
         if (style === 'inline') {
-            item.innerHTML = likeIcon('bili-video-card__stats--icon')
+            item.innerHTML = likeIcon('bili-video-card__stats--icon', size)
                 + `<span class="bili-video-card__stats--text">${isFractions ? '1/' + value : value + '%'}</span>`;
+        } else {
+            item.innerHTML = likeIcon('', size)
+                + `<span>${isFractions ? '1/' + value : value + '%'}</span>`;
+        }
+        if (group) {
+            group.appendChild(item);
+        } else if (style === 'inline') {
             statsEl.appendChild(item);
         } else {
-            item.innerHTML = likeIcon('')
-                + `<span>${isFractions ? '1/' + value : value + '%'}</span>`;
             statsEl.insertBefore(item, statsEl.lastElementChild);
         }
         const valueEl = item.querySelector('.' + RATE_VALUE_CLASS);
@@ -474,6 +521,38 @@
             GM.addStyle(`
                 .bili-video-card__stats--left{
                     flex-wrap: wrap;
+                    align-self: flex-end;
+                }
+            `);
+        }
+
+        if (isSpacePage) {
+            // UP 主页的卡片比首页的窄，一行要塞下播放、弹幕、比率、时长四项，
+            // 按默认 12px 的间距放不下，多出来的部分会全压到时长上，把时长挤成几个点。
+            // 排法和首页/搜索页对齐：播放/弹幕/比率在一组里（groupStats 负责建这个容器），
+            // 时长单独留在外面。这样间距收紧一点就够用，真塞不下时也只有左边这一组换行，
+            // 时长始终待在右边、保持自己的宽度。
+            GM.addStyle(`
+                .${STATS_GROUP_CLASS} {
+                    display: flex;
+                    flex-wrap: wrap;
+                    align-items: center;
+                }
+                .bili-cover-card__stats:has(.${RATE_ITEM_CLASS}) > .${STATS_GROUP_CLASS} > .bili-cover-card__stat {
+                    margin-right: 4px;
+                }
+                /* B 站给 :last-child（也就是时长）加了 flex:1 1 0%，比率现在也排在组内最后，
+                   会被套上同一条规则压扁，这里盖回来 */
+                .bili-cover-card__stats:has(.${RATE_ITEM_CLASS}) > .${STATS_GROUP_CLASS} > .${RATE_ITEM_CLASS} {
+                    flex: 0 0 auto;
+                }
+                /* 时长：B 站给 :last-child 加了 flex:1 1 0%，会把时长压扁，盖回来。
+                   align-self 对齐搜索页——搜索页的统计条是固定高度的，左边那一组
+                   （.bili-video-card__stats--left）用 align-self:flex-end 贴底，
+                   于是换行后时长正好和最后一行（比率）齐平。我们这边容器是自适应高度，
+                   所以把同样的对齐加在时长自己身上，效果一致。 */
+                .bili-cover-card__stats:has(.${RATE_ITEM_CLASS}) > .bili-cover-card__stat:last-child {
+                    flex: 0 0 auto;
                     align-self: flex-end;
                 }
             `);
