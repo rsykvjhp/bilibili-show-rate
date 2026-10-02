@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站显示点赞率、投币率、收藏率
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
-// @description  显示b站 | bilibili | 哔哩哔哩 卡片的点赞率、投币率、收藏率、转发率、弹幕密度，支持逐页面配置
+// @version      1.4.0
+// @description  显示b站 | bilibili | 哔哩哔哩 卡片的点赞率、投币率、收藏率、转发率、弹幕密度，支持逐页面配置和自定义比率配色规则
 // @license      MIT
 // @author       魂hp
 // @website      https://www.bilibili.com/opus/880791333061525569
@@ -190,24 +190,127 @@
         return match ? match[0] : null;
     }
 
+    // ===================== 比率配色规则 =====================
+
+    // 每个指标 × 每种表示方式各有一套「数值 → 颜色」规则，用户可以在设置面板里改。
+    // 阈值填的是卡片上显示的那个数：
+    //   分数模式   at 是分母的上限，分母 <= at 时匹配（分母越小说明比率越高）
+    //   百分比模式 at 是百分比的下限，百分比 >= at 时匹配（百分比越大说明比率越高）
+    // 规则从上往下判断，第一条匹配的生效；最后一条是兜底规则，没有阈值（at = null）。
+    const COLOR_RULES_KEY = 'colorRules';
+
+    // 默认规则完整复刻 1.3.0 里写死的那一套：
+    //   分数   分母 <=10 橘色留 2 位、<=25 紫色留 1 位、其余不变色取整
+    //   百分比 >=10% 橘色留 2 位、>=4% 紫色留 2 位、其余不变色留 2 位
+    const DEFAULT_RULES = {
+        fractions: [
+            { at: 10, color: 'DarkOrange', digits: 2 },
+            { at: 25, color: 'violet', digits: 1 },
+            { at: null, color: 'inherit', digits: 0 }
+        ],
+        percentage: [
+            { at: 10, color: 'DarkOrange', digits: 2 },
+            { at: 4, color: 'violet', digits: 2 },
+            { at: null, color: 'inherit', digits: 2 }
+        ]
+    };
+
+    // 表示方式的两个取值，同时也是 colorRules 里的两套规则
+    const MODES = ['fractions', 'percentage'];
+
+    function cloneDefaultRules(mode) {
+        return DEFAULT_RULES[mode].map(function (rule) {
+            return { at: rule.at, color: rule.color, digits: rule.digits };
+        });
+    }
+
+    function clampDigits(value) {
+        const n = Math.round(Number(value));
+        return isFinite(n) ? Math.min(Math.max(n, 0), 6) : 2;
+    }
+
+    function colorText(value) {
+        return String(value == null ? '' : value).trim() || 'inherit';
+    }
+
+    // 兜底规则永远排在最后，前面的按阈值排（分数从小到大、百分比从大到小），
+    // 这样「第一条匹配的生效」的结果才符合直觉。
+    function sortRules(rules, mode) {
+        const head = rules.slice(0, -1).sort(mode === 'fractions'
+            ? function (a, b) { return a.at - b.at; }
+            : function (a, b) { return b.at - a.at; });
+        return head.concat(rules.slice(-1));
+    }
+
+    // 把存下来的规则洗一遍：丢掉阈值非法的项、补齐兜底项、排好序。
+    // 颜色不做校验 —— CSS 遇到非法颜色会自己忽略，退回卡片原本的文字色。
+    function normalizeRules(raw, mode) {
+        const list = Array.isArray(raw) ? raw : [];
+        const rules = [];
+        list.slice(0, -1).forEach(function (rule) {
+            const at = Number(rule && rule.at);
+            if (isFinite(at) && at > 0) {
+                rules.push({ at: at, color: colorText(rule.color), digits: clampDigits(rule.digits) });
+            }
+        });
+        const tail = list[list.length - 1];
+        const hasTail = tail && tail.at == null;
+        rules.push({
+            at: null,
+            color: hasTail ? colorText(tail.color) : 'inherit',
+            digits: hasTail ? clampDigits(tail.digits) : 2
+        });
+        return sortRules(rules, mode);
+    }
+
+    // metric -> mode -> [{ at, color, digits }]
+    let colorRules = loadColorRules();
+
+    function loadColorRules() {
+        const saved = GM_getValue(COLOR_RULES_KEY) || {};
+        const out = {};
+        METRICS.forEach(function (metric) {
+            const savedMetric = saved[metric.key] || {};
+            out[metric.key] = {};
+            MODES.forEach(function (mode) {
+                out[metric.key][mode] = savedMetric[mode]
+                    ? normalizeRules(savedMetric[mode], mode)
+                    : cloneDefaultRules(mode);
+            });
+        });
+        return out;
+    }
+
+    function saveColorRules() {
+        GM_setValue(COLOR_RULES_KEY, colorRules);
+    }
+
+    function rulesFor(metricKey, mode) {
+        const byMetric = colorRules[metricKey];
+        return (byMetric && byMetric[mode]) || DEFAULT_RULES[mode];
+    }
+
     // 根据播放量和某个统计量算出比率，并给出对应的颜色
-    function getRateAndColor(view, num) {
+    function getRateAndColor(view, num, metricKey) {
         const res = { rate: 0, color: 'inherit' };
         if (!view || !num) {
             return res;
         }
-        const ratio = view / num;
-        // 比率大于十分之一为橘色，大于二十五分之一为紫色，其他为黑色
-        // （如需调整颜色或区间，改这里即可）
-        if (ratio <= 10) {
-            res.rate = isFractions ? ratio.toFixed(2) : (num * 100 / view).toFixed(2);
-            res.color = 'DarkOrange';
-        } else if (ratio <= 25) {
-            res.rate = isFractions ? ratio.toFixed(1) : (num * 100 / view).toFixed(2);
-            res.color = 'violet';
-        } else {
-            res.rate = isFractions ? ratio.toFixed(0) : (num * 100 / view).toFixed(2);
+        const ratio = view / num;           // 分数模式显示的就是它（分母）
+        const percent = num * 100 / view;   // 百分比模式显示的就是它
+        const mode = isFractions ? 'fractions' : 'percentage';
+        const rules = rulesFor(metricKey, mode);
+        // 从上往下找第一条匹配的，兜底规则在最后，所以一定能命中
+        let rule = rules[rules.length - 1];
+        for (let i = 0; i < rules.length; i++) {
+            const at = rules[i].at;
+            if (at == null || (isFractions ? ratio <= at : percent >= at)) {
+                rule = rules[i];
+                break;
+            }
         }
+        res.rate = (isFractions ? ratio : percent).toFixed(rule.digits);
+        res.color = rule.color;
         return res;
     }
 
@@ -326,7 +429,7 @@
 
     // 造一个指标项。item 的标签结构从卡片自带的统计项上克隆，保证样式一致
     function buildRateItem(template, style, metric, stat, size, templateDisplay) {
-        const rateAndColor = getRateAndColor(stat.view, stat[metric.key]);
+        const rateAndColor = getRateAndColor(stat.view, stat[metric.key], metric.key);
         const item = template.cloneNode(false);
         item.classList.add(RATE_ITEM_CLASS);
         item.dataset.metric = metric.key;
@@ -594,6 +697,10 @@
     const isVideoPage = /^\/video\//.test(location.pathname)
         || /^\/list\/watchlater/.test(location.pathname);
 
+    // 视频页那几个比率是建好就不再更新的，把它的刷新函数挂到这里，
+    // 面板改了配色规则时能一起刷新（其它页面不需要，保持 null）
+    let refreshVideoRate = null;
+
     if (isVideoPage) {
         document.addEventListener('DOMContentLoaded', function () {
             if (!(unsafeWindow?.__INITIAL_STATE__?.videoData?.stat?.view)) {
@@ -649,7 +756,7 @@
                 }
                 // 计算点赞率、投币率、收藏率、转发率，并获取对应的颜色
                 getRateAndColorByNameStr(nameStr) {
-                    return getRateAndColor(this.videoStat.view, this.videoStat[nameStr]);
+                    return getRateAndColor(this.videoStat.view, this.videoStat[nameStr], nameStr);
                 }
             }
 
@@ -696,6 +803,7 @@
                 }
             }
             updateRate();
+            refreshVideoRate = updateRate;
 
             let addElementObserver = new MutationObserver(function (mutationsList) {
                 for (let mutation of mutationsList) {
@@ -812,14 +920,37 @@
     const COST_TIP = '勾选后需要按视频逐个查询 B 站接口，访问更频繁、更耗流量。'
         + '同一分组里勾一项和勾多项的流量是一样的——每个视频只查一次，拿到的就是完整数据。';
 
-    // 面板所在页面的深浅色。B 站夜间模式会把 html 背景刷成深色
-    function isDarkPage() {
-        const bg = getComputedStyle(document.documentElement).backgroundColor || '';
-        const match = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(bg);
-        if (match) {
-            return (0.299 * +match[1] + 0.587 * +match[2] + 0.114 * +match[3]) < 128;
+    // 面板里的悬停提示：选择器 -> 文案。前面的优先。
+    // 复选框和文字都在 label 里，所以移到复选框上和移到文字上都会命中同一个选择器。
+    const TIPS = [
+        ['.brp-row.brp-cost', COST_TIP],
+        ['.brp-digits', '保留的小数位数']
+    ];
+
+    // 某个元素背景色的感知亮度（BT.601 那套系数），取不到就返回 null。
+    // 全透明的背景不算数 —— rgba(0,0,0,0) 会被算成纯黑，浅色页面也会被判成深色。
+    function bgLuma(el) {
+        if (!el) {
+            return null;
         }
-        return matchMedia('(prefers-color-scheme: dark)').matches;
+        const match = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/
+            .exec(getComputedStyle(el).backgroundColor || '');
+        if (!match) {
+            return null;
+        }
+        if (match[4] !== undefined && Number(match[4]) === 0) {
+            return null;
+        }
+        return 0.299 * +match[1] + 0.587 * +match[2] + 0.114 * +match[3];
+    }
+
+    // 面板跟着页面走浅色还是深色。
+    // B 站只在 body 上铺底色、html 是透明的，所以 html 读不到就往 body 退一层；
+    // 两层都透明才回落到系统偏好（Dark Reader、B 站夜间模式都会把 html 刷深，所以它们都能被认出来）。
+    function isDarkPage() {
+        const luma = bgLuma(document.documentElement);
+        const value = luma == null ? bgLuma(document.body) : luma;
+        return value == null ? matchMedia('(prefers-color-scheme: dark)').matches : value < 128;
     }
 
     function panelSectionHtml(page) {
@@ -837,6 +968,196 @@
                     <div class="brp-sec-title">${page.label}</div>
                     <div class="brp-panel">${rows}</div>
                 </div>`;
+    }
+
+    // ===================== 配色规则区的 UI =====================
+
+    // 正在编辑哪个指标的规则（点上面的指标按钮切换）
+    let colorEditMetric = METRICS[0].key;
+
+    function esc(text) {
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    // 把任意合法的 CSS 颜色（颜色名 / #rgb / #rrggbb / rgb()）转成 #rrggbb。
+    // <input type="color"> 只认十六进制，所以要先转一道；转不了返回 null。
+    function toHex(color) {
+        const text = String(color == null ? '' : color).trim();
+        if (!text || text === 'inherit' || text === 'currentColor') {
+            return null;
+        }
+        const probe = document.createElement('span');
+        probe.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden';
+        probe.style.color = text;
+        if (!probe.style.color) {
+            return null;    // 非法颜色在赋值时就被丢掉了
+        }
+        (document.body || document.documentElement).appendChild(probe);
+        const rgb = getComputedStyle(probe).color;
+        probe.remove();
+        const match = /rgba?\((\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(rgb);
+        if (!match) {
+            return null;
+        }
+        return '#' + [1, 2, 3].map(function (i) {
+            return ('0' + Number(match[i]).toString(16)).slice(-2);
+        }).join('');
+    }
+
+    function currentMode() {
+        return isFractions ? 'fractions' : 'percentage';
+    }
+
+    function currentColorRules() {
+        return colorRules[colorEditMetric][currentMode()];
+    }
+
+    // 一行规则：阈值 + 颜色 + 小数位。最后一行是兜底，没有阈值也不能删。
+    function colorRuleRowHtml(rule, index, mode) {
+        const isTail = rule.at == null;
+        const head = isTail
+            ? '<span class="brp-rule-label">其余</span><span class="brp-num brp-num-empty"></span>'
+            : `<span class="brp-rule-label">${mode === 'fractions' ? '分母 ≤' : '≥'}</span>`
+                + `<input class="brp-num" type="number" min="0" step="any" value="${rule.at}" data-rule-at="${index}">`;
+        const del = isTail
+            ? '<span class="brp-del-slot"></span>'
+            : `<button class="brp-del" type="button" data-rule-del="${index}" title="删除这条规则">×</button>`;
+        return `<div class="brp-rule">
+                    ${head}
+                    <span class="brp-unit">${mode === 'fractions' ? '' : '%'}</span>
+                    <input class="brp-swatch" type="color" value="${toHex(rule.color) || '#9499a0'}" data-rule-color="${index}" title="选颜色">
+                    <input class="brp-color-text" type="text" value="${esc(rule.color)}" data-rule-color-text="${index}" spellcheck="false">
+                    <input class="brp-num brp-digits" type="number" min="0" max="6" value="${rule.digits}" data-rule-digits="${index}">
+                    <span class="brp-unit">位</span>
+                    ${del}
+                </div>`;
+    }
+
+    function colorBodyHtml() {
+        const mode = currentMode();
+        const chips = METRICS.map(function (m) {
+            return `<button class="brp-chip${m.key === colorEditMetric ? ' brp-on' : ''}" type="button"`
+                + ` data-cmetric="${m.key}">${m.label}</button>`;
+        }).join('');
+        const rows = rulesFor(colorEditMetric, mode).map(function (rule, index) {
+            return colorRuleRowHtml(rule, index, mode);
+        }).join('');
+        const tip = mode === 'fractions'
+            ? '分数模式填分母：分母 ≤ 阈值时用这个颜色（分母越小说明比率越高）。'
+            : '百分比模式填百分比：百分比 ≥ 阈值时用这个颜色（百分比越大说明比率越高）。';
+        return `<div class="brp-chips">${chips}</div>
+                <div class="brp-mode-line">正在编辑「${isFractions ? '分数' : '百分比'}」规则，切换上方「显示格式」可编辑另一套</div>
+                <div class="brp-rules">${rows}</div>
+                <div class="brp-actions">
+                    <button class="brp-mini" type="button" data-add-rule>+ 添加规则<span class="brp-hint">（会按数值大小自动排序）</span></button>
+                    <button class="brp-mini" type="button" data-reset-rules title="只恢复当前指标、当前表示方式的规则">恢复本指标默认</button>
+                </div>
+                <div class="brp-note">${tip}</div>
+                <div class="brp-note brp-warn">从上往下判断，第一条匹配的生效。</div>
+                <div class="brp-note">颜色可以自己选或者写颜色名（red、green、chocolate，参考 <a href="https://www.runoob.com/cssref/css-colornames.html" target="_blank" rel="noopener noreferrer">CSS 颜色名称</a>）或 #ff8fb1。</div>`;
+    }
+
+    function renderColorBody() {
+        const box = panel && panel.querySelector('[data-color-body]');
+        if (box) {
+            box.innerHTML = colorBodyHtml();
+        }
+    }
+
+    function setRuleColor(index, value, fromPicker) {
+        const rules = currentColorRules();
+        const rule = rules[index];
+        if (!rule) {
+            return;
+        }
+        if (fromPicker) {
+            rule.color = value;
+            const textEl = panel.querySelector(`[data-rule-color-text="${index}"]`);
+            if (textEl) {
+                textEl.value = value;
+            }
+        } else {
+            const hex = toHex(value);
+            const textEl = panel.querySelector(`[data-rule-color-text="${index}"]`);
+            if (!hex) {
+                // 非法颜色，把输入框退回上一个能用的值
+                if (textEl) {
+                    textEl.value = rule.color;
+                }
+                return;
+            }
+            rule.color = String(value).trim();
+            const swatch = panel.querySelector(`[data-rule-color="${index}"]`);
+            if (swatch) {
+                swatch.value = hex;
+            }
+        }
+        saveColorRules();
+        rerenderCards();
+    }
+
+    function setRuleThreshold(index, value) {
+        const rules = currentColorRules();
+        const rule = rules[index];
+        if (!rule) {
+            return;
+        }
+        const at = Number(String(value).trim());
+        if (!isFinite(at) || at <= 0) {
+            // 填了空或者 0：这次改动不算数，把输入框退回原来的阈值
+            const el = panel.querySelector(`[data-rule-at="${index}"]`);
+            if (el) {
+                el.value = rule.at;
+            }
+            return;
+        }
+        rule.at = at;
+        const mode = currentMode();
+        const before = rules.map(function (r) { return r.at; }).join(',');
+        colorRules[colorEditMetric][mode] = sortRules(rules, mode);
+        const after = currentColorRules().map(function (r) { return r.at; }).join(',');
+        saveColorRules();
+        // 只有顺序真的变了才重画 —— 否则用户正在编辑的输入框会被换掉、焦点丢掉
+        if (before !== after) {
+            renderColorBody();
+        }
+        rerenderCards();
+    }
+
+    function setRuleDigits(index, value) {
+        const rules = currentColorRules();
+        const rule = rules[index];
+        const raw = String(value).trim();
+        if (!rule || !raw) {
+            return;     // 输入框被清空就先不动
+        }
+        const digits = clampDigits(raw);
+        rule.digits = digits;
+        const el = panel.querySelector(`[data-rule-digits="${index}"]`);
+        if (el && el.value !== String(digits)) {
+            el.value = digits;      // 超出 0~6 时把输入框拉回来
+        }
+        saveColorRules();
+        rerenderCards();
+    }
+
+    function addColorRule() {
+        const mode = currentMode();
+        const rules = currentColorRules();
+        const thresholds = rules.slice(0, -1);
+        const last = thresholds[thresholds.length - 1];
+        // 新规则的阈值取最宽松那一档的外面一点，保证加进去就能生效
+        const base = last ? last.at : 10;
+        const at = mode === 'fractions' ? base * 2 : Math.max(0.01, base / 2);
+        rules.splice(rules.length - 1, 0, { at: at, color: 'DarkOrange', digits: 2 });
+        colorRules[colorEditMetric][mode] = sortRules(rules, mode);
+        saveColorRules();
+        renderColorBody();
+        rerenderCards();
     }
 
     function panelStyle() {
@@ -903,13 +1224,22 @@
                 padding: 8px;
                 overflow-y: auto;
                 overscroll-behavior: contain;
-                /* 能滚，但不显示滚动条 */
-                scrollbar-width: none;
-                -ms-overflow-style: none;
             }
+            /* 细滚动条。没用 scrollbar-width: thin —— 那个在 Chrome 里就有 8~9px，
+               而且一旦设了非 auto 的值，::-webkit-scrollbar 这一套就不生效了 */
             .brp-body::-webkit-scrollbar {
-                width: 0;
-                height: 0;
+                width: 6px;
+                height: 6px;
+            }
+            .brp-body::-webkit-scrollbar-track {
+                background: transparent;
+            }
+            .brp-body::-webkit-scrollbar-thumb {
+                border-radius: 3px;
+                background: #ffc9da;
+            }
+            .brp-body::-webkit-scrollbar-thumb:hover {
+                background: #ff9ec0;
             }
             .brp-sec {
                 margin-bottom: 6px;
@@ -974,6 +1304,14 @@
                 font-size: 12px;
                 color: #a98b96;
             }
+            /* 判断顺序这条要让人一眼看到，用红色标出来 */
+            .brp-note.brp-warn {
+                color: #e02f44;
+            }
+            .brp-note a {
+                color: #ff5c8a;
+                text-decoration: underline;
+            }
             .brp-seg {
                 display: flex;
                 overflow: hidden;
@@ -1011,6 +1349,159 @@
                 cursor: pointer;
             }
             .brp-btn:hover {
+                background: #ffeef5;
+            }
+            /* ---- 比率配色规则 ---- */
+            /* 这些控件都自己定宽高，统一按 border-box 算，免得 padding / border 把宽度撑出去 */
+            .brp-num, .brp-color-text, .brp-swatch, .brp-chip, .brp-mini, .brp-del {
+                box-sizing: border-box;
+            }
+            /* 指标切换：每个指标一套规则 */
+            .brp-chips {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                margin-bottom: 4px;
+            }
+            .brp-chip {
+                padding: 2px 8px;
+                border: 1px solid #ffc9da;
+                border-radius: 999px;
+                background: #fff;
+                color: #4a2b38;
+                font: inherit;
+                font-size: 12px;
+                cursor: pointer;
+            }
+            .brp-chip:hover {
+                background: #ffeef5;
+            }
+            .brp-chip.brp-on {
+                border-color: #ff7ba9;
+                background: #ff7ba9;
+                color: #fff;
+            }
+            .brp-mode-line {
+                margin: 2px 0 5px;
+                font-size: 12px;
+                color: #a98b96;
+            }
+            .brp-rules {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            /* 一行规则：阈值 + 颜色 + 小数位。放不下就换行，不硬挤 */
+            .brp-rule {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 4px;
+            }
+            .brp-rule-label {
+                flex: 0 0 auto;
+                width: 46px;
+                font-size: 12px;
+                color: #a98b96;
+                text-align: right;
+            }
+            .brp-num {
+                flex: 0 0 auto;
+                width: 54px;
+                padding: 2px 4px;
+                border: 1px solid #ffc9da;
+                border-radius: 6px;
+                background: #fff;
+                color: inherit;
+                font: inherit;
+                font-size: 12px;
+                /* 去掉数字框的上下箭头：这里宽度紧，而且用户基本靠输入 */
+                appearance: textfield;
+            }
+            .brp-num::-webkit-outer-spin-button,
+            .brp-num::-webkit-inner-spin-button {
+                -webkit-appearance: none;
+                margin: 0;
+            }
+            /* 兜底规则没有阈值，占位保持右侧对齐 */
+            .brp-num-empty {
+                border-color: transparent;
+                background: none;
+            }
+            .brp-digits {
+                width: 40px;
+            }
+            .brp-unit {
+                flex: 0 0 auto;
+                font-size: 12px;
+                color: #a98b96;
+            }
+            .brp-swatch {
+                flex: 0 0 auto;
+                width: 30px;
+                height: 22px;
+                padding: 0;
+                border: 1px solid #ffc9da;
+                border-radius: 6px;
+                background: #fff;
+                cursor: pointer;
+            }
+            .brp-color-text {
+                flex: 1 1 70px;
+                min-width: 58px;
+                padding: 2px 4px;
+                border: 1px solid #ffc9da;
+                border-radius: 6px;
+                background: #fff;
+                color: inherit;
+                font: inherit;
+                font-size: 12px;
+            }
+            .brp-del {
+                flex: 0 0 auto;
+                width: 20px;
+                height: 20px;
+                padding: 0;
+                border: 0;
+                border-radius: 50%;
+                background: none;
+                color: #c2185b;
+                font-size: 15px;
+                line-height: 1;
+                cursor: pointer;
+            }
+            .brp-del:hover {
+                background: #ffe0ec;
+            }
+            .brp-del-slot {
+                flex: 0 0 auto;
+                width: 20px;
+            }
+            .brp-actions {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 6px;
+                margin-top: 6px;
+            }
+            /* 按钮里的小字补充说明 */
+            .brp-hint {
+                margin-left: 2px;
+                font-size: 11px;
+                font-weight: 400;
+                opacity: .8;
+            }
+            .brp-mini {
+                padding: 3px 10px;
+                border: 1px solid #ffc9da;
+                border-radius: 6px;
+                background: #fff;
+                color: #4a2b38;
+                font: inherit;
+                font-size: 12px;
+                cursor: pointer;
+            }
+            .brp-mini:hover {
                 background: #ffeef5;
             }
             /* 悬停提示。挂在 body 上、position:fixed，免得被 .brp-body 的滚动容器裁掉 */
@@ -1062,6 +1553,18 @@
             .brp.brp-dark .brp-note {
                 color: #a98b96;
             }
+            .brp.brp-dark .brp-note.brp-warn {
+                color: #ff7d8c;
+            }
+            .brp.brp-dark .brp-note a {
+                color: #ff9ec0;
+            }
+            .brp.brp-dark .brp-body::-webkit-scrollbar-thumb {
+                background: #5d3f49;
+            }
+            .brp.brp-dark .brp-body::-webkit-scrollbar-thumb:hover {
+                background: #7a5261;
+            }
             .brp.brp-dark .brp-seg {
                 border-color: #4a3038;
             }
@@ -1084,6 +1587,40 @@
             .brp.brp-dark .brp-btn:hover {
                 background: #3a2b32;
             }
+            .brp.brp-dark .brp-chip,
+            .brp.brp-dark .brp-mini {
+                border-color: #4a3038;
+                background: #2b2026;
+                color: #f0dfe5;
+            }
+            .brp.brp-dark .brp-chip:hover,
+            .brp.brp-dark .brp-mini:hover {
+                background: #3a2b32;
+            }
+            .brp.brp-dark .brp-chip.brp-on {
+                border-color: #d4527c;
+                background: #d4527c;
+                color: #fff;
+            }
+            .brp.brp-dark .brp-num,
+            .brp.brp-dark .brp-color-text {
+                border-color: #4a3038;
+                background: #221a1e;
+                color: #f0dfe5;
+            }
+            .brp.brp-dark .brp-num-empty {
+                border-color: transparent;
+                background: none;
+            }
+            .brp.brp-dark .brp-swatch {
+                border-color: #4a3038;
+            }
+            .brp.brp-dark .brp-del {
+                color: #ff9ec0;
+            }
+            .brp.brp-dark .brp-del:hover {
+                background: #3a2b32;
+            }
         `;
     }
 
@@ -1097,6 +1634,10 @@
             delete el.dataset.rateKey;
         });
         render();
+        // 视频页的比率不在卡片里，单独刷一遍
+        if (refreshVideoRate) {
+            refreshVideoRate();
+        }
     }
 
     function setRepresentation(next) {
@@ -1127,6 +1668,8 @@
         panel.querySelectorAll('input[data-metric]').forEach(function (input) {
             input.checked = !!config[input.dataset.page][input.dataset.metric];
         });
+        // 表示方式可能刚被切过，配色区要跟着换成另一套规则
+        renderColorBody();
     }
 
     function savePanelPos() {
@@ -1156,6 +1699,11 @@
                     </div>
                     <div class="brp-note">百分比如 3.25%，分数如 1/31。修改后立即生效。</div>
                 </div>
+                <div class="brp-sec">
+                    <div class="brp-sec-title">比率配色</div>
+                    <div class="brp-note">每个指标、每种表示方式各有一套「数值 → 颜色」规则，改动立即生效。</div>
+                    <div data-color-body>${colorBodyHtml()}</div>
+                </div>
                 ${PAGES.map(panelSectionHtml).join('')}
             </div>
             <div class="brp-foot">
@@ -1166,18 +1714,18 @@
         // 悬停提示。提示框挂在 body 上（position:fixed），免得被 .brp-body 的滚动容器裁掉
         const tip = document.createElement('div');
         tip.className = 'brp-tip';
-        tip.textContent = COST_TIP;
         document.body.appendChild(tip);
 
-        let tipRow = null;
+        // 当前挂着提示的那条 TIPS 规则（不是元素本身，同一类元素之间移动时不用重设文案）
+        let tipHit = null;
 
         function hideTip() {
-            tipRow = null;
+            tipHit = null;
             tip.style.display = 'none';
         }
 
         function moveTip(event) {
-            if (!tipRow) {
+            if (!tipHit) {
                 return;
             }
             const rect = tip.getBoundingClientRect();
@@ -1187,14 +1735,19 @@
             tip.style.top = y + 'px';
         }
 
-        // 复选框和文字都在 label 里，所以移到复选框上和移到文字上都算悬停
         panel.addEventListener('mouseover', function (event) {
-            const row = event.target.closest('.brp-row.brp-cost');
-            if (row === tipRow) {
+            let hit = null;
+            for (let i = 0; i < TIPS.length && !hit; i++) {
+                if (event.target.closest(TIPS[i][0])) {
+                    hit = TIPS[i];
+                }
+            }
+            if (hit === tipHit) {
                 return;
             }
-            tipRow = row;
-            if (row) {
+            tipHit = hit;
+            if (hit) {
+                tip.textContent = hit[1];
                 tip.style.display = 'block';
                 moveTip(event);
             } else {
@@ -1232,6 +1785,35 @@
                 setRepresentation(rep.dataset.rep);
                 return;
             }
+            // 切换正在编辑的指标
+            const chip = event.target.closest('[data-cmetric]');
+            if (chip) {
+                colorEditMetric = chip.dataset.cmetric;
+                renderColorBody();
+                return;
+            }
+            if (event.target.closest('[data-add-rule]')) {
+                addColorRule();
+                return;
+            }
+            if (event.target.closest('[data-reset-rules]')) {
+                colorRules[colorEditMetric][currentMode()] = cloneDefaultRules(currentMode());
+                saveColorRules();
+                renderColorBody();
+                rerenderCards();
+                return;
+            }
+            const del = event.target.closest('[data-rule-del]');
+            if (del) {
+                const mode = currentMode();
+                const rules = currentColorRules();
+                rules.splice(Number(del.dataset.ruleDel), 1);
+                colorRules[colorEditMetric][mode] = sortRules(rules, mode);
+                saveColorRules();
+                renderColorBody();
+                rerenderCards();
+                return;
+            }
             if (event.target.closest('.brp-reset')) {
                 PAGES.forEach(function (p) {
                     METRICS.forEach(function (m) {
@@ -1244,10 +1826,33 @@
             }
         });
 
-        // 勾选框：存下来并立刻重渲染
+        // 勾选框 + 配色规则的输入框：存下来并立刻重渲染。
+        // 规则里的输入统一等 change（失焦 / 回车 / 取色器关闭）再处理，别边打字边处理：
+        // 「re」这种半截颜色会被判非法直接退回，阈值临时越过相邻档位还会让整块重画、
+        // 把用户正在编辑的那个输入框换掉。
         panel.addEventListener('change', function (event) {
             const input = event.target;
-            if (input.tagName !== 'INPUT') {
+            const at = input.dataset.ruleAt;
+            const digits = input.dataset.ruleDigits;
+            const colorText = input.dataset.ruleColorText;
+            const color = input.dataset.ruleColor;
+            if (at != null) {
+                setRuleThreshold(Number(at), input.value);
+                return;
+            }
+            if (digits != null) {
+                setRuleDigits(Number(digits), input.value);
+                return;
+            }
+            if (colorText != null) {
+                setRuleColor(Number(colorText), input.value, false);
+                return;
+            }
+            if (color != null) {
+                setRuleColor(Number(color), input.value, true);
+                return;
+            }
+            if (input.tagName !== 'INPUT' || !input.dataset.page) {
                 return;
             }
             config[input.dataset.page][input.dataset.metric] = input.checked;
