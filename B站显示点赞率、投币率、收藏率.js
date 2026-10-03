@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.4.0
 // @description  显示b站 | bilibili | 哔哩哔哩 卡片的点赞率、投币率、收藏率、转发率、弹幕密度，支持逐页面配置和自定义比率配色规则
-// @license      MIT
+// @license      GPL-3.0-or-later
 // @author       魂hp
 // @website      https://www.bilibili.com/opus/880791333061525569
 // @match        http*://www.bilibili.com/
